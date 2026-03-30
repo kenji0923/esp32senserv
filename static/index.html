@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 Sensor Hub</title>
+    <style>
+        body { font-family: sans-serif; background: #f4f4f9; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; background: white; margin-bottom: 20px; font-size: 13px; }
+        th, td { border: 1px solid #ddd; padding: 6px; text-align: left; }
+        th { background-color: #007bff; color: white; }
+        .controls { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px; }
+        .manual { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        button { padding: 6px 10px; cursor: pointer; background: #28a745; color: white; border: none; border-radius: 4px; margin-right: 2px; }
+        button.sync { background: #17a2b8; font-weight: bold; }
+        button.write { background: #ffc107; color: black; font-weight: bold; }
+        input.small { width: 45px; }
+        input.med { width: 110px; }
+        .live-data { color: blue; font-weight: bold; white-space: nowrap; }
+        .timestamp { color: #555; font-size: 11px; white-space: nowrap; }
+        .tlg-section { border-left: 4px solid #17a2b8; padding-left: 15px; margin-top: 10px; }
+        .manual h2 { margin-top: 0; }
+        .manual h3 { margin-bottom: 6px; }
+        .manual ul { margin-top: 6px; margin-bottom: 12px; }
+        .error-text { color: #b00020; font-weight: bold; margin-left: 10px; }
+    </style>
+</head>
+<body>
+    <h1>ESP32 Sensor Hub Management</h1>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Log</th>
+                <th>Tlg Bucket</th>
+                <th>MAC Address</th>
+                <th>Name</th>
+                <th>Sleep (s)</th>
+                <th>Work Delay (ms)</th>
+                <th>Batt Avg</th>
+                <th>SHT Avg</th>
+                <th>SHT Wait (ms)</th>
+                <th>DPS OSR</th>
+                <th>DPS Avg</th>
+                <th>DPS Wait (ms)</th>
+                <th>Live: V / T / H / P</th>
+                <th>Last Received</th>
+                <th>Hash</th>
+            </tr>
+        </thead>
+        <tbody id="client-table"></tbody>
+    </table>
+
+    <div class="controls">
+        <button class="sync" onclick="syncSystem()">Full Sync with ESP32</button>
+        <button class="write" id="btn-write" onclick="writeModified()">WRITE MODIFIED TO SERVER</button>
+        <span id="sync-status" style="margin-left:10px"></span>
+        <span id="write-error" class="error-text"></span>
+        
+        <div class="tlg-section">
+            <h3>Telegraf Destination Settings</h3>
+            Host: <input type="text" id="tlg-host" class="med" placeholder="localhost" onchange="saveTlg()">
+            Port: <input type="number" id="tlg-port" class="small" placeholder="8094" min="1" max="65535" step="1" onchange="saveTlg()">
+            Proto: <select id="tlg-proto" onchange="saveTlg()"><option value="udp">UDP</option><option value="tcp">TCP</option></select>
+        </div>
+    </div>
+
+    <div class="manual">
+        <h2>Manual</h2>
+
+        <h3>Overview</h3>
+        <p>
+            This page is used to inspect ESP32 sensor clients, update their configuration, and monitor the latest
+            reported battery voltage and sensor readings. The table combines live data from the server log with
+            configuration values read from each client record.
+        </p>
+
+        <h3>Basic Workflow</h3>
+        <ul>
+            <li>Press <strong>Full Sync with ESP32</strong> to fetch the current client list and the current stored settings from the server.</li>
+            <li>Edit any fields in the table.</li>
+            <li>Press <strong>WRITE MODIFIED TO SERVER</strong> to send only changed values to the ESP32 server.</li>
+            <li>Wait for the client to report again. Some changes take effect only after the client receives the updated config from the server.</li>
+        </ul>
+
+        <h3>Field Guide</h3>
+        <ul>
+            <li><strong>MAC Address</strong>: Unique identifier of the ESP32 sensor client.</li>
+            <li><strong>Name</strong>: Short label stored on the server for easier identification in logs and the web UI.</li>
+            <li><strong>Sleep (s)</strong>: Interval between measurement cycles. Valid values: 0 to 86400. Between measurements, the device goes to deep sleep. If <code>0</code> is specified, the device does not go to deep sleep, stays awake, and performs measurements every 1 second.</li>
+            <li><strong>Work Delay (ms)</strong>: Delay after the client initializes the I2C bus and before it starts sensor access. Valid values: 1 to 65535.</li>
+            <li><strong>Batt Avg</strong>: Number of ADC samples averaged for the battery-voltage reading. Valid values: 1 to 255.</li>
+            <li><strong>SHT Avg</strong>: Number of SHT40 measurement cycles averaged for temperature and humidity. Valid values: 1 to 255.</li>
+            <li><strong>SHT Wait (ms)</strong>: Delay between sending the SHT40 measurement command and reading the result. Valid values: 1 to 65535.</li>
+            <li><strong>DPS OSR</strong>: DPS310 oversampling setting used by the pressure readout. The code-to-oversampling mapping is 0=x1, 1=x2, 2=x4, 3=x8, 4=x16, 5=x32, 6=x64, 7=x128.</li>
+            <li><strong>DPS Avg</strong>: Number of DPS310 pressure/temperature measurement cycles averaged. Valid values: 1 to 255.</li>
+            <li><strong>DPS Wait (ms)</strong>: Delay between sending each DPS310 measurement command and reading the result. The current client code uses this same wait after both DPS310 commands in the sequence. Valid values: 1 to 65535.</li>
+            <li><strong>Hash</strong>: Configuration hash used to detect whether the client and server are using the same config.</li>
+        </ul>
+
+        <h3>Live Data</h3>
+        <p>
+            The live data columns show the most recent values received by the web server from each client. These values
+            update automatically while the page is open. A configuration change is not confirmed until the client reports
+            again and the displayed hash matches the server-side configuration.
+        </p>
+
+        <h3>Telegraf Logging</h3>
+        <p>
+            When logging is enabled for a client, the web server forwards incoming measurements to the configured Telegraf
+            destination. The bucket name is attached as a tag in the exported line protocol.
+        </p>
+
+        <h3>Notes and Cautions</h3>
+        <ul>
+            <li>Very short sensor wait times can produce invalid or stale readings if the sensor conversion has not finished yet.</li>
+            <li>Changing DPS310 oversampling may require a different DPS wait time for stable measurements.</li>
+            <li>If values appear to revert after editing, run a full sync and verify that both the server firmware and client firmware are updated to the same config schema.</li>
+        </ul>
+    </div>
+
+    <script>
+        let clients = [];
+        let baseline = {};
+        const fieldRules = {
+            sleep: {label: "Sleep", min: 0, max: 86400},
+            work_delay_ms: {label: "Work Delay", min: 1, max: 65535},
+            batt_avg: {label: "Batt Avg", min: 1, max: 255},
+            sht_avg: {label: "SHT Avg", min: 1, max: 255},
+            sht_read_wait_time_ms: {label: "SHT Wait", min: 1, max: 65535},
+            dps_osr: {label: "DPS OSR", min: 0, max: 7},
+            dps_avg: {label: "DPS Avg", min: 1, max: 255},
+            dps_read_wait_time_ms: {label: "DPS Wait", min: 1, max: 65535}
+        };
+
+        function readValidatedInt(inputId, rule) {
+            const el = document.getElementById(inputId);
+            const value = Number(el.value);
+            if (!Number.isInteger(value) || value < rule.min || value > rule.max) {
+                throw new Error(`${rule.label} must be an integer in ${rule.min}..${rule.max}.`);
+            }
+            return value;
+        }
+
+        async function syncSystem() {
+            document.getElementById("sync-status").innerText = "Syncing...";
+            await fetch("/api/fetch", {method: "POST"});
+            await new Promise(r => setTimeout(r, 1200));
+            await rebuildTable();
+            document.getElementById("sync-status").innerText = "Ready.";
+        }
+
+        async function rebuildTable() {
+            const res = await fetch("/api/clients");
+            clients = await res.json();
+            const body = document.getElementById("client-table");
+            body.innerHTML = "";
+            baseline = {};
+            
+            clients.forEach(c => {
+                const rowId = `row-${c.mac.replace(/:/g, '')}`;
+                baseline[c.mac] = JSON.parse(JSON.stringify(c));
+                
+                body.innerHTML += `
+                    <tr id="${rowId}">
+                        <td><input type="checkbox" id="log-${c.mac}" ${c.log_enabled ? 'checked' : ''} onchange="updateLogSetting('${c.mac}')"></td>
+                        <td><input type="text" class="med" id="bucket-${c.mac}" value="${c.tlg_bucket || 'sensors'}" onchange="updateLogSetting('${c.mac}')"></td>
+                        <td style="font-family:monospace">${c.mac}</td>
+                        <td><input type="text" class="med" id="name-${c.mac}" value="${c.name || ''}"></td>
+                        <td><input type="number" class="small" id="sleep-${c.mac}" value="${c.sleep ?? 5}" min="0" max="86400" step="1"></td>
+                        <td><input type="number" class="small" id="work-${c.mac}" value="${c.work_delay_ms ?? 50}" min="1" max="65535" step="1"></td>
+                        <td><input type="number" class="small" id="batt-${c.mac}" value="${c.batt_avg ?? 16}" min="1" max="255" step="1"></td>
+                        <td><input type="number" class="small" id="sht-${c.mac}" value="${c.sht_avg ?? 4}" min="1" max="255" step="1"></td>
+                        <td><input type="number" class="small" id="swait-${c.mac}" value="${c.sht_read_wait_time_ms ?? 30}" min="1" max="65535" step="1"></td>
+                        <td><input type="number" class="small" id="osr-${c.mac}" value="${c.dps_osr ?? 4}" min="0" max="7" step="1"></td>
+                        <td><input type="number" class="small" id="davg-${c.mac}" value="${c.dps_avg ?? 1}" min="1" max="255" step="1"></td>
+                        <td><input type="number" class="small" id="pwait-${c.mac}" value="${c.dps_read_wait_time_ms ?? 120}" min="1" max="65535" step="1"></td>
+                        <td class="live-data" id="live-${rowId}">${c.v_batt || '-'}V / ${c.temperature || '-'}°C / ${c.humidity || '-'}% / ${c.pressure || '-'}Pa</td>
+                        <td class="timestamp" id="time-${rowId}">${c.last_seen || 'Never'}</td>
+                        <td style="font-family:monospace; font-size:10px" id="hash-${rowId}">${c.hash || '-'}</td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function updateLogSetting(mac) {
+            const enabled = document.getElementById(`log-${mac}`).checked;
+            const bucket = document.getElementById(`bucket-${mac}`).value;
+            await fetch("/api/client_log", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({mac, enabled, bucket})
+            });
+        }
+
+        async function saveTlg() {
+            const host = document.getElementById("tlg-host").value;
+            const port = parseInt(document.getElementById("tlg-port").value);
+            const protocol = document.getElementById("tlg-proto").value;
+            if (!host) {
+                document.getElementById("write-error").innerText = "Telegraf host must not be empty.";
+                return;
+            }
+            if (!Number.isInteger(port) || port < 1 || port > 65535) {
+                document.getElementById("write-error").innerText = "Telegraf port must be an integer in 1..65535.";
+                return;
+            }
+            await fetch("/api/telegraf", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({host, port, protocol})
+            });
+            document.getElementById("write-error").innerText = "";
+        }
+
+        async function writeModified() {
+            const btn = document.getElementById("btn-write");
+            const errorEl = document.getElementById("write-error");
+            errorEl.innerText = "";
+            btn.innerText = "WRITING...";
+            try {
+                for (const mac in baseline) {
+                    const b = baseline[mac];
+                    const fields = {
+                        name: document.getElementById(`name-${mac}`).value,
+                        sleep: readValidatedInt(`sleep-${mac}`, fieldRules.sleep),
+                        work_delay_ms: readValidatedInt(`work-${mac}`, fieldRules.work_delay_ms),
+                        batt_avg: readValidatedInt(`batt-${mac}`, fieldRules.batt_avg),
+                        sht_avg: readValidatedInt(`sht-${mac}`, fieldRules.sht_avg),
+                        sht_read_wait_time_ms: readValidatedInt(`swait-${mac}`, fieldRules.sht_read_wait_time_ms),
+                        dps_osr: readValidatedInt(`osr-${mac}`, fieldRules.dps_osr),
+                        dps_avg: readValidatedInt(`davg-${mac}`, fieldRules.dps_avg),
+                        dps_read_wait_time_ms: readValidatedInt(`pwait-${mac}`, fieldRules.dps_read_wait_time_ms)
+                    };
+                    if (fields.name !== b.name) await fetch("/api/name", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({mac, name: fields.name})});
+                    for (let k in fields) {
+                        if (k !== 'name' && fields[k] !== b[k]) {
+                            await fetch("/api/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({mac, key: k, val: fields[k]})});
+                        }
+                    }
+                }
+                btn.innerText = "WRITE MODIFIED TO SERVER";
+                setTimeout(syncSystem, 500);
+            } catch (err) {
+                errorEl.innerText = err.message;
+                btn.innerText = "WRITE MODIFIED TO SERVER";
+            }
+        }
+
+        async function liveUpdate() {
+            const res = await fetch("/api/clients");
+            const freshData = await res.json();
+            freshData.forEach(c => {
+                const rowId = `row-${c.mac.replace(/:/g, '')}`;
+                const liveEl = document.getElementById(`live-${rowId}`);
+                const timeEl = document.getElementById(`time-${rowId}`);
+                const hashEl = document.getElementById(`hash-${rowId}`);
+                if (liveEl) liveEl.innerText = `${c.v_batt || '-'}V / ${c.temperature || '-'}°C / ${c.humidity || '-'}% / ${c.pressure || '-'}Pa`;
+                if (timeEl) timeEl.innerText = c.last_seen || 'Never';
+                if (hashEl) hashEl.innerText = c.hash || '-';
+            });
+        }
+
+        async function loadTlg() {
+            const res = await fetch("/api/telegraf");
+            const cfg = await res.json();
+            document.getElementById("tlg-host").value = cfg.host;
+            document.getElementById("tlg-port").value = cfg.port;
+            document.getElementById("tlg-proto").value = cfg.protocol;
+        }
+
+        setInterval(liveUpdate, 1000);
+        loadTlg();
+        rebuildTable();
+    </script>
+</body>
+</html>
